@@ -18,6 +18,7 @@ wrote project-info.json
 ## License
 
 Copyright © 2017 Brian Olsen
+
 Based on code made by Juho Teperi
 
 Distributed under the Eclipse Public License either version 1.0 or (at your option) any later version.
