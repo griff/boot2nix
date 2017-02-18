@@ -9,11 +9,22 @@ Boot task  to generate project-info.json for use with nix's Maven repository gen
 (require '[griff/boot2nix :refer :all])
 ```
 
+First build a local repo cache
+
 ```
-$ boot boot2nix
+$ BOOT_LOCAL_REPO=repo boot release
+```
+
+```
+$ boot boot2nix -l repo
 ...
 wrote project-info.json
 ```
+
+## Snapshot dependencies
+
+Currently snapshow dependencies are not supported.
+
 
 ## License
 

@@ -2,6 +2,7 @@
   (:require [cemerick.pomegranate.aether :as aether]
             [boot.aether :as boot-aether]
             [boot.pod :as pod]
+            [boot.core :as boot-core]
             [clojure.java.io :as io]
             [clojure.walk :as walk]
             [clojure.string :as string]
@@ -10,7 +11,8 @@
   (:import (org.sonatype.aether.util ChecksumUtils)
            (org.sonatype.aether.resolution ArtifactResult)
            (org.sonatype.aether.repository RemoteRepository)
-           (org.sonatype.aether.artifact Artifact)))
+           (org.sonatype.aether.artifact Artifact)
+           (java.io File)))
 
 (defn sha1 [file]
   (let [res (ChecksumUtils/calc file ["SHA-1"])]
@@ -42,11 +44,14 @@
                   (dissoc dep :deps)))
           x))
 
+(def default-local-repo
+  (io/file (System/getProperty "user.home") ".m2" "repository"))
+
 (defn resolve-artifacts*
   [env]
   (try
     (aether/resolve-artifacts*
-      :coordinates       (keys (boot-aether/resolve-dependencies-memoized* env))
+      :coordinates       (:dependencies env) #_(keys (boot-aether/resolve-dependencies-memoized* env))
       :repositories      (->> (or (seq (:repositories env)) @boot-aether/default-repositories)
                               (map (juxt first (fn [[x y]] (if (map? y) y {:url y}))))
                               (map (juxt first (fn [[x y]] (update-in y [:update] #(or % @boot-aether/update?))))))
@@ -73,11 +78,22 @@
          "-" (.getVersion artifact)
          ".pom")))
 
-(defn artifact-url [{:keys [groupId artifactId baseVersion version
+(defn artifact-url [{:keys [default-repo]}
+                    {:keys [groupId artifactId baseVersion version
                             classifier extension repo]
                      :as artifact}]
-  (when (instance? RemoteRepository repo)
-    (str (.getUrl repo)
+  (let [base (cond
+               (instance? RemoteRepository repo)
+               (.getUrl repo)
+
+               default-repo default-repo
+
+               :else
+               (throw (ex-info (str "Missing url for artifact ["
+                                    groupId "/" artifactId " \"" baseVersion
+                                    "\" :extension \"" extension "\" :classifier \"" classifier "\"]")
+                               {:artifact artifact})))]
+    (str base
          "/" (string/replace groupId
                              #"\."
                              "/")
@@ -89,17 +105,17 @@
            (str "-" classifier))
          "." extension)))
 
-(defn add-url [artifact]
+(defn add-url [env artifact]
   (merge artifact
-         {:url (artifact-url artifact)}))
+         {:url (artifact-url env artifact)}))
 
 (defn add-sha1 [{:keys [file] :as artifact}]
   (merge artifact
          {:sha1 (sha1 file)}))
 
-(defn art-spec [^ArtifactResult result]
+(defn art-spec [env ^ArtifactResult result]
   (let [artifact (.getArtifact result)]
-    (->
+    (->>
       {:file           (.getFile artifact)
        :repo           (.getRepository result)
        :groupId        (.getGroupId artifact)
@@ -109,7 +125,7 @@
        :baseVersion    (.getBaseVersion artifact)
        :version        (.getVersion artifact)
        :authenticated false}
-      add-url
+      (add-url env)
       add-sha1)))
 
 (defn cleanup [spec]
@@ -117,12 +133,12 @@
       (set/rename-keys {:baseVersion :version})
       (select-keys [:artifactId :groupId :version :sha1 :classifier
                     :extension :authenticated :url])))
-(defn dep-spec [^ArtifactResult result]
-  (let [spec (art-spec result)
+(defn dep-info [env ^ArtifactResult result]
+  (let [spec (art-spec env result)
         repo (.getRepository result)
         artifact (.getArtifact result)]
     [(cleanup spec)
-     (->
+     #_(->
        spec
        (merge
          {:file (pom-file artifact)
@@ -136,7 +152,7 @@
   (-> env
       resolve-artifacts*
       (->>
-        (mapcat dep-spec))))
+        (mapcat (partial dep-info env)))))
 
 (defn project-info [env {:keys [project version classifier packaging]}]
   {:project      {:groupId    (when project (namespace project))
@@ -146,13 +162,101 @@
                   :extension  (or packaging "pom")}
    :dependencies (deps env)})
 
-(defn write-project-info [env pom-opts file]
-  (spit (io/file file) (json/write-str (project-info env pom-opts)))
-  (println (format "wrote %s" file)))
+(defn extension [file]
+  (-> file
+      .getName
+      (string/split #"\.")
+      last))
+
+(defn artifact? [file]
+  (->> file
+       extension
+       (contains? #{"jar" "pom"})))
+
+(defn group-id [local-repo ^File file]
+  (let [local-repo (io/as-file local-repo)
+        group-part (-> file .getParentFile .getParentFile .getParentFile)
+        parent (fn self [seq ^File file]
+                 (if (= local-repo file)
+                   seq
+                   (conj (self seq (.getParentFile file))
+                         (.getName file))))]
+    (string/join "." (parent [] group-part))))
+
+(defn dep-spec [local-repo file]
+  (let [name (.getName file)
+        ext (extension file)
+        base-version (-> file .getParentFile .getName)
+        artifact-id (-> file .getParentFile .getParentFile .getName)
+        group-id (group-id local-repo file)
+        c-begin (+ 2 (count artifact-id) (count base-version))
+        c-end  (- (count name) (count ext) 1)
+        classifier (if (> c-end c-begin)
+                     (subs name c-begin c-end))]
+    (when (string/starts-with?
+            name
+            (str artifact-id "-" base-version))
+      (cond-> [(symbol group-id artifact-id) base-version
+               :extension ext]
+        classifier (conj :classifier classifier)))))
+
+(defn coordinates [local-repo]
+  #_(let [local-repo (io/as-file local-repo)])
+  (->> local-repo
+       io/as-file
+       file-seq
+       (filter #(.isFile %))
+       (filter artifact?)
+       (map #(dep-spec local-repo %))
+       (filter #(not (nil? %)))))
+
+(defn write-project-info [env pom-opts {:keys [local-repo output default-repo]}]
+  (println (format "scanning %s" local-repo))
+  (spit (io/file output)
+        (json/write-str
+          (project-info
+            (assoc boot.pod/env
+              :default-repo default-repo
+              :local-repo local-repo
+              :dependencies (coordinates local-repo))
+            pom-opts)))
+  (println (format "wrote %s" output)))
 
 (comment
+  (coordinates "../frontend/repo")
+  (write-project-info
+    boot.pod/env
+    {}
+    {:output "project-info.json"
+     :local-repo (io/file "repo")})
+  (deps
+    (assoc boot.pod/env
+      :local-repo (io/file "../frontend/repo")
+      :dependencies (coordinates "../frontend/repo")))
+
+  (llsd (io/file "repo") (io/file "repo" "test" "boot" "1.2" "boot-1.2-sources.jar"))
+  (->> (io/file "repo")
+       file-seq
+       (filter #(.isFile %))
+       (filter artifact?)
+       (map #(dep-spec (io/file "repo") %))
+       (filter #(not (nil? %)))
+       #_(map #(last (clojure.string/split (.getName %) #"\.")))
+       #_distinct)
+
+  (filter #(.isFile %)
+          (file-seq (io/file "repo")))
+  (.equals (io/file "repo"))
+  (boot-core/get-sys-env)
+  default-local-repo
+  @boot-aether/local-repo
   @boot-aether/default-repositories
-  boot.pod/env
+  (mapcat #(pod/with-eval-in % (:dependencies boot.pod/env))
+       (keys boot.pod/pods))
+  boot.core/*boot-version*
+  (:local-repo) (boot-core/get-env)
+
+  (deps boot.pod/env)
   (write-project-info
     boot.pod/env
     (:task-options (meta #'boot.task.built-in/pom))

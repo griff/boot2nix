@@ -1,12 +1,13 @@
-(def +version+ "1.0.0")
+(def +version+ "1.1.0")
 
 (set-env!
   :resource-paths #{"src"}
   :dependencies   '[[org.clojure/clojure "1.8.0" :scope "provided"]
                     [boot/core "2.6.0" :scope "provided"]
                     [boot/aether "2.6.0" :scope "test"]
-                    [org.clojure/data.json "0.2.6" :scope "test"]
-                    [adzerk/bootlaces "0.1.13" :scope "test"]])
+                    [org.clojure/data.json "0.2.6"]
+                    [adzerk/bootlaces "0.1.13" :scope "test"]
+                    #_[jungerer "0.4.0-SNAPSHOT"]])
 
 (require '[adzerk.bootlaces :refer :all])
 (bootlaces! +version+)
